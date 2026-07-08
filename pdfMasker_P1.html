@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<!--
+  明細書マスキング（ブラウザ内処理・サーバ送信なし）
+  ─────────────────────────────────────────────
+  対応様式:
+    [A] 三井住友海上あいおい生命「手数料支払明細書」
+        → 会社名行 ＋ 契約者名列（カナ行含む）を黒塗り
+    [B] 三井住友海上「手数料早期支払明細書」
+        → 会社名行 ＋ 契約者名列（内容不問・全行）を黒塗り
+
+  仕組み: 各ページを画像化 → 様式ごとの固定座標＋テキスト位置で
+  黒塗り → 画像だけのPDFとして再構成。テキスト層が消えるため、
+  黒塗りの下から文字を取り出す手段が原理的にありません。
+
+  座標がズレた場合は <script> 内の FORMATS 定数（単位: PDFポイント）
+  を調整してください。
+-->
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>明細書マスキング — 契約者名を自動黒塗り</title>
+<style>
+  :root{
+    --paper:#fafaf8; --ink:#161616; --sub:#5f6360;
+    --line:#e4e2da; --danger:#b3261e; --warnbg:#f7d94c;
+    --mono:ui-monospace,"SF Mono","Cascadia Mono",Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);
+    font-family:"Hiragino Kaku Gothic ProN","Hiragino Sans","Yu Gothic UI","Noto Sans JP",system-ui,sans-serif;
+    font-size:15px;line-height:1.75}
+  main{max-width:900px;margin:0 auto;padding:40px 20px 80px}
+
+  header h1{font-size:25px;margin:0 0 6px;font-weight:700}
+  .demo{display:inline-block;position:relative;padding:0 3px}
+  .demo .ink{position:absolute;inset:-1px -2px;background:var(--ink);
+    transform:scaleX(0);transform-origin:left;
+    animation:wipe .8s cubic-bezier(.7,0,.3,1) .7s forwards}
+  @keyframes wipe{to{transform:scaleX(1)}}
+  @media (prefers-reduced-motion:reduce){.demo .ink{animation:none;transform:scaleX(1)}}
+  .privacy{color:var(--sub);margin:2px 0 0}
+  .privacy b{color:var(--ink)}
+
+  .zones{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:26px}
+  @media (max-width:640px){.zones{grid-template-columns:1fr}}
+  .drop{border:2px dashed var(--ink);border-radius:10px;background:#fff;
+    padding:7px 16px;text-align:center;cursor:pointer;transition:background .15s}
+  .drop.hover{background:#f1efe7}
+  .drop .tag{display:inline-block;font-size:12px;font-family:var(--mono);
+    border:1px solid var(--ink);border-radius:99px;padding:1px 10px;margin-bottom:8px}
+  .drop strong{display:block;font-size:16px}
+  .drop small{color:var(--sub)}
+
+  .prompts{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}
+  @media (max-width:640px){.prompts{grid-template-columns:1fr}}
+  .pbox{background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px 14px 14px}
+  .pbox-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+  .pbox-head h2{font-size:13px;margin:0;flex:1;font-weight:700}
+  .pbox textarea{width:100%;min-height:125px;resize:vertical;
+    font-family:inherit;font-size:13px;line-height:1.8;color:var(--ink);
+    background:var(--paper);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+  textarea:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+
+  .controls{display:flex;flex-wrap:wrap;gap:12px 24px;align-items:center;margin:16px 0 0}
+  label.toggle{display:flex;gap:8px;align-items:center;cursor:pointer}
+
+  button{font:inherit;border:1.5px solid var(--ink);border-radius:8px;
+    padding:7px 16px;cursor:pointer;background:#fff;color:var(--ink)}
+  button.primary{background:var(--ink);color:#fff}
+  button:disabled{opacity:.35;cursor:not-allowed}
+  button:focus-visible,input:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+  .mini{font-size:12px;padding:3px 10px;border-width:1px}
+
+  .card{background:#fff;border:1px solid var(--line);border-radius:12px;
+    margin-top:24px;padding:16px 18px 20px}
+  .card-head{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center}
+  .ftag{font-size:11px;font-family:var(--mono);border:1px solid var(--ink);
+    border-radius:99px;padding:1px 8px;white-space:nowrap}
+  .fname{font-weight:700;word-break:break-all}
+  .status{font-family:var(--mono);font-size:12px;color:var(--sub);flex:1;min-width:140px}
+  .status.err{color:var(--danger)}
+  .badge{font-size:12px;background:var(--warnbg);border-radius:6px;padding:2px 8px}
+  figure.page{margin:18px 0 0}
+  .wrap{position:relative;border:1px solid var(--line);background:#fff}
+  .wrap canvas{display:block;width:100%;height:auto}
+  .wrap canvas.overlay{position:absolute;inset:0;height:100%;pointer-events:none}
+  body.manual .wrap canvas.overlay{pointer-events:auto;touch-action:none;cursor:crosshair}
+  figcaption{display:flex;gap:12px;align-items:center;margin-top:6px;
+    font-family:var(--mono);font-size:12px;color:var(--sub)}
+  .cnt{color:var(--ink)}
+  .note{font-size:12px;color:var(--sub);margin-top:8px}
+
+  .checklist{margin-top:44px;border-top:1px solid var(--line);padding-top:18px;
+    font-size:13px;color:var(--sub)}
+  .checklist h2{font-size:14px;color:var(--ink);margin:0 0 6px}
+  #libError{display:none;margin-top:20px;padding:12px 16px;border:1.5px solid var(--danger);
+    border-radius:8px;color:var(--danger);background:#fff}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>明細書マスキング
+      <span class="demo">契約者名<span class="ink" aria-hidden="true"></span></span>
+    </h1>
+    <p class="privacy">処理はすべて<b>このブラウザの中だけ</b>で行われます。ファイルはどこにも送信されません。<br>
+    様式ごとに契約者名の位置を自動判定して黒塗りし、テキストデータごと消した「画像PDF」として保存します。</p>
+  </header>
+
+  <div class="zones">
+    <div class="drop" id="drop-aioi" role="button" tabindex="0" aria-label="あいおい生命の明細をアップ">
+      <span class="tag">A</span>
+      <strong>あいおい生命の明細をアップ</strong>
+      <small>手数料支払明細書（三井住友海上あいおい生命）<br>会社名 ＋ 契約者名の列を黒塗り</small>
+      <input type="file" id="file-aioi" accept="application/pdf,.pdf" multiple hidden>
+    </div>
+    <div class="drop" id="drop-ms" role="button" tabindex="0" aria-label="三井住友海上の明細をアップ">
+      <span class="tag">B</span>
+      <strong>三井住友海上の明細をアップ</strong>
+      <small>手数料早期支払明細書（三井住友海上）<br>会社名 ＋ 契約者名の列を黒塗り（全行）</small>
+      <input type="file" id="file-ms" accept="application/pdf,.pdf" multiple hidden>
+    </div>
+  </div>
+
+  <p class="note">黒塗りしたPDFをClaudeにアップしてExcel化するときは、下のプロンプトをコピーして一緒に送ってください。文面はこの場で編集できます（ページを再読み込みすると元の文面に戻ります）。</p>
+
+  <div class="prompts">
+    <div class="pbox">
+      <div class="pbox-head">
+        <span class="tag">A</span>
+        <h2>あいおい生命のmasked PDF用プロンプト</h2>
+        <button class="mini" data-copy="prompt-aioi">コピー</button>
+      </div>
+      <textarea id="prompt-aioi" spellcheck="false">このPDF（三井住友海上あいおい生命「手数料支払明細書」を黒塗りした画像PDF）をExcel化してください。
+
+・Excelの1列目（A列）には、その行が載っているページの左上にあるコードを入れる。
+　「（７１４４０３）ＡＤＤ７４　－ＰＭ１１」のような表記は「ADD74-PM11」の形（半角）に揃える
+・2列目以降は、全ページの表をそのまま縦につなげる（列の値は変えない。ヘッダー行は先頭に1回だけ）
+・次の①②の両方に当てはまる行を黄色で塗りつぶす：
+　① A列が ADD74-PM07／ADD74-PM10／ADD74-PM11／ADD74-PM13／ADD74-PM21／ADD74-PM23／ADD74-PM40 のいずれか
+　② 「種別」の列が S1 または H2（全角表記のＳ１・Ｈ２も同じとみなす）
+・完成したxlsxファイルをダウンロードできる形で出力してください。</textarea>
+    </div>
+    <div class="pbox">
+      <div class="pbox-head">
+        <span class="tag">B</span>
+        <h2>三井住友海上のmasked PDF用プロンプト</h2>
+        <button class="mini" data-copy="prompt-ms">コピー</button>
+      </div>
+      <textarea id="prompt-ms" spellcheck="false">このPDF（三井住友海上「手数料早期支払明細書」を黒塗りした画像PDF）をExcel化してください。
+
+・全ページの表を1枚のシートに縦につなげる（ヘッダー行は先頭に1回だけ）
+・列の構成と各セルの値はPDFのまま保持する（並べ替え・省略・集計はしない）
+・「証券番号」の列が次のいずれかになっているセルを黄色で塗りつぶす：
+　ＡＤＤ７４ＰＭ０７合計／ＡＤＤ７４ＰＭ１０合計／ＡＤＤ７４ＰＭ１１合計／ＡＤＤ７４ＰＭ１３合計／ＡＤＤ７４ＰＭ２１合計／ＡＤＤ７４ＰＭ２３合計／ＡＤＤ７４ＰＭ４０合計
+・完成したxlsxファイルをダウンロードできる形で出力してください。</textarea>
+    </div>
+  </div>
+
+  <div class="controls">
+    <label class="toggle">
+      <input type="checkbox" id="manualMode">
+      手動で黒塗りを追加する（プレビュー上をドラッグ）
+    </label>
+    <button id="saveAll" class="mini" disabled>すべて保存</button>
+  </div>
+  <p class="note">自動黒塗りは1ファイル1000ページまで全ページ処理されます。
+  手動追加・やり直しが使えるのは40ページ以下のファイルのみです（41ページ以上は省メモリ処理のため自動黒塗りのみ）。</p>
+
+  <div id="libError">ライブラリ（pdf.js / jsPDF）を読み込めませんでした。ネット接続を確認するか、READMEの手順でライブラリを同梱してください。</div>
+
+  <div id="results"></div>
+
+  <section class="checklist">
+    <h2>保存後の最終チェック</h2>
+    <p>出力PDFを開き、①黒塗り部分を範囲選択してもコピーできないこと、②テキスト検索で契約者名・会社名がヒットしないこと、
+    ③黒塗りの掛け漏れがないこと、を確認してください。出力は画像ベースなので①②は原理的に安全ですが、
+    ③（様式変更などによる位置ズレ）だけは人の目が頼りです。間違った欄にアップした場合は処理を中止してエラー表示します。</p>
+  </section>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script>
+(function(){
+  "use strict";
+
+  /* ---------- プロンプトのコピー（ライブラリ不要・常時有効） ---------- */
+  document.querySelectorAll("[data-copy]").forEach(function(btn){
+    btn.addEventListener("click", function(){
+      var ta = document.getElementById(btn.getAttribute("data-copy"));
+      if(!ta) return;
+      function done(){
+        var t = btn.textContent;
+        btn.textContent = "コピーしました"; btn.disabled = true;
+        setTimeout(function(){ btn.textContent = t; btn.disabled = false; }, 1500);
+      }
+      function fallback(){
+        ta.focus(); ta.select();
+        try{ document.execCommand("copy"); }catch(e){}
+        ta.setSelectionRange(0, 0); ta.blur(); done();
+      }
+      if(navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(ta.value).then(done, fallback);
+      } else fallback();
+    });
+  });
+
+  if(!window.pdfjsLib || !window.jspdf){
+    document.getElementById("libError").style.display = "block";
+    return;
+  }
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+  var SCALE = 2.0;          // 出力解像度（PDFポイントの2倍 ≒ 144dpi）
+  var MAX_PAGES = 1000;     // 1ファイルあたりの上限ページ数
+  var BIG_PAGES = 41;       // これ以上のページ数は省メモリの逐次モード（手動追加なし）
+  var PREVIEW_PAGES = 3;    // 逐次モードでプレビュー表示する先頭ページ数
+  var COMPANY_KEY = "ｒｉｍｅ－ｏｎｅ";   // 会社名行の検出キー
+
+  /* 様式定義（座標の単位はPDFポイント。ズレたらここを調整） */
+  var FORMATS = {
+    aioi: {
+      tag: "あいおい生命",
+      full: "手数料支払明細書（三井住友海上あいおい生命）",
+      marker: "あいおい生命",
+      other: "ms",
+      mode: "line",
+      band: [159.6, 238.6],   // 契約者名列の左右端
+      anchorX: 123.8,          // データ行の目印（保険種類列の開始x）
+      anchorTol: 3.0,
+      skipWords: ["小計", "契約者名"]
+    },
+    ms: {
+      tag: "三井住友海上",
+      full: "手数料早期支払明細書（三井住友海上）",
+      marker: "手数料早期支払明細書",
+      other: "aioi",
+      mode: "item",
+      band: [140.0, 213.5],    // 契約者名列の左右端
+      bodyY: [152.0, 584.0]    // 表本体の上下端（ヘッダ・フッタ除外）
+    }
+  };
+
+  var results = document.getElementById("results");
+  var records = [];
+
+  /* ---------- 入力（2つのアップ欄） ---------- */
+  function bindZone(zoneId, inputId, fmtKey){
+    var zone = document.getElementById(zoneId);
+    var input = document.getElementById(inputId);
+    zone.addEventListener("click", function(){ input.click(); });
+    zone.addEventListener("keydown", function(e){
+      if(e.key === "Enter" || e.key === " "){ e.preventDefault(); input.click(); }
+    });
+    input.addEventListener("change", function(){
+      handleFiles(input.files, fmtKey); input.value = "";
+    });
+    ["dragover","dragenter"].forEach(function(ev){
+      zone.addEventListener(ev, function(e){ e.preventDefault(); zone.classList.add("hover"); });
+    });
+    ["dragleave","drop"].forEach(function(ev){
+      zone.addEventListener(ev, function(e){ e.preventDefault(); zone.classList.remove("hover"); });
+    });
+    zone.addEventListener("drop", function(e){ handleFiles(e.dataTransfer.files, fmtKey); });
+  }
+  bindZone("drop-aioi", "file-aioi", "aioi");
+  bindZone("drop-ms",   "file-ms",   "ms");
+
+  document.getElementById("manualMode").addEventListener("change", function(e){
+    document.body.classList.toggle("manual", e.target.checked);
+  });
+  document.getElementById("saveAll").addEventListener("click", function(){
+    records.filter(function(r){ return r.done; }).forEach(function(r, i){
+      setTimeout(function(){ downloadRecord(r); }, i * 600);
+    });
+  });
+
+  function handleFiles(list, fmtKey){
+    Array.prototype.slice.call(list).forEach(function(f){
+      if(/\.pdf$/i.test(f.name) || f.type === "application/pdf") processFile(f, fmtKey);
+    });
+  }
+  function tick(){ return new Promise(function(r){ setTimeout(r, 0); }); }
+  function updateSaveAll(){
+    document.getElementById("saveAll").disabled =
+      !records.some(function(r){ return r.done; });
+  }
+
+  /* ---------- テキストアイテム取得（canvas座標系） ---------- */
+  async function getItems(page, viewport){
+    var tc = await page.getTextContent();
+    var out = [];
+    tc.items.forEach(function(it){
+      if(!it.str) return;
+      var m = pdfjsLib.Util.transform(viewport.transform, it.transform);
+      var fh = Math.hypot(m[2], m[3]) || ((it.height || 8) * SCALE);
+      var x0 = m[4], base = m[5], w = (it.width || 0) * SCALE;
+      out.push({ str: it.str, x0: x0, x1: x0 + w,
+                 y0: base - fh, y1: base + fh * 0.25 });
+    });
+    return out;
+  }
+
+  /* y近傍でアイテムを行にまとめる */
+  function groupLines(items){
+    var tol = 2.5 * SCALE, lines = [];
+    items.slice().sort(function(a,b){ return (a.y0-b.y0) || (a.x0-b.x0); })
+      .forEach(function(it){
+        var cy = (it.y0 + it.y1) / 2, hit = null;
+        for(var i = 0; i < lines.length; i++){
+          if(Math.abs(cy - lines[i].cy) < tol){ hit = lines[i]; break; }
+        }
+        if(!hit){ hit = { items: [], y0: it.y0, y1: it.y1, cy: cy }; lines.push(hit); }
+        hit.items.push(it);
+        hit.y0 = Math.min(hit.y0, it.y0); hit.y1 = Math.max(hit.y1, it.y1);
+        hit.cy = (hit.y0 + hit.y1) / 2;
+      });
+    lines.forEach(function(L){
+      L.items.sort(function(a,b){ return a.x0 - b.x0; });
+      L.text = L.items.map(function(i){ return i.str; }).join("");
+      L.x0 = L.items[0].x0;
+      L.x1 = L.items.reduce(function(m,i){ return Math.max(m, i.x1); }, 0);
+    });
+    return lines;
+  }
+
+  /* ---------- 黒塗り矩形の計算（検証済みロジック） ---------- */
+  function computeRects(items, fmt){
+    var rects = [], lines = groupLines(items);
+    var bx0 = fmt.band[0] * SCALE, bx1 = fmt.band[1] * SCALE;
+
+    lines.forEach(function(L){                    // 会社名行（両様式共通）
+      if(L.text.indexOf(COMPANY_KEY) !== -1){
+        rects.push({ x0: L.x0 - 2, y0: L.y0 - 2, x1: L.x1 + 2, y1: L.y1 + 2 });
+      }
+    });
+
+    if(fmt.mode === "line"){                      // あいおい: 行内アンカー方式
+      var ax = fmt.anchorX * SCALE, at = fmt.anchorTol * SCALE;
+      lines.forEach(function(L){
+        var t = L.text;
+        if(t.indexOf("ｒｉｍｅ") !== -1) return;
+        for(var i = 0; i < fmt.skipWords.length; i++){
+          if(t.indexOf(fmt.skipWords[i]) !== -1) return;
+        }
+        var anchors = [];
+        for(var k = 0; k < L.items.length; k++){
+          var it = L.items[k];
+          if(it.str.charAt(0) === "＊") return;   // 小計・区切り行
+          if(Math.abs(it.x0 - ax) <= at) anchors.push(it);
+        }
+        if(!anchors.length) return;
+        var y0 = Math.min.apply(null, anchors.map(function(i){ return i.y0; }));
+        var y1 = Math.max.apply(null, anchors.map(function(i){ return i.y1; }));
+        rects.push({ x0: bx0, y0: y0 - 2, x1: bx1, y1: y1 + 2 });
+      });
+
+    } else {                                      // 三井: 帯×アイテム交差（内容不問）
+      var by0 = fmt.bodyY[0] * SCALE, by1 = fmt.bodyY[1] * SCALE, iv = [];
+      items.forEach(function(it){
+        if(it.x1 <= bx0 || it.x0 >= bx1) return;
+        if(it.y0 < by0 || it.y1 > by1) return;
+        iv.push([it.y0 - 2, it.y1 + 2]);
+      });
+      iv.sort(function(a,b){ return a[0] - b[0]; });
+      var merged = [];
+      iv.forEach(function(seg){
+        if(merged.length && seg[0] <= merged[merged.length-1][1] + 2){
+          merged[merged.length-1][1] = Math.max(merged[merged.length-1][1], seg[1]);
+        } else merged.push(seg.slice());
+      });
+      merged.forEach(function(seg){
+        rects.push({ x0: bx0, y0: seg[0], x1: bx1, y1: seg[1] });
+      });
+    }
+    return rects;
+  }
+
+  /* ---------- 本体 ---------- */
+  async function processFile(file, fmtKey){
+    var fmt = FORMATS[fmtKey];
+    var rec = { file: file, fmtKey: fmtKey, pages: [], done: false, big: false, bigDoc: null };
+    records.push(rec);
+
+    var card = document.createElement("section"); card.className = "card";
+    var head = document.createElement("div"); head.className = "card-head";
+    var ftag = document.createElement("span"); ftag.className = "ftag"; ftag.textContent = fmt.tag;
+    var fname = document.createElement("span"); fname.className = "fname"; fname.textContent = file.name;
+    var status = document.createElement("span"); status.className = "status"; status.textContent = "読み込み中…";
+    var dl = document.createElement("button"); dl.className = "primary";
+    dl.textContent = "黒塗りPDFを保存"; dl.disabled = true;
+    dl.addEventListener("click", function(){ downloadRecord(rec); });
+    head.appendChild(ftag); head.appendChild(fname); head.appendChild(status); head.appendChild(dl);
+    card.appendChild(head);
+    var pagesDiv = document.createElement("div"); card.appendChild(pagesDiv);
+    results.appendChild(card);
+
+    function fail(msg){ status.className = "status err"; status.textContent = msg; }
+
+    try{
+      var buf = await file.arrayBuffer();
+      var pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+      if(pdf.numPages > MAX_PAGES){
+        fail("ページ数が上限(" + MAX_PAGES + ")を超えています（" + pdf.numPages +
+             "ページ）。分割してからアップしてください");
+        pdf.destroy(); return;
+      }
+      rec.big = pdf.numPages >= BIG_PAGES;
+      var total = 0, zeroPages = 0;
+
+      for(var p = 1; p <= pdf.numPages; p++){
+        status.textContent = "ページ " + p + "/" + pdf.numPages + " を処理中…";
+        await tick();
+        var page = await pdf.getPage(p);
+        var viewport = page.getViewport({ scale: SCALE });
+        if(viewport.rotation % 360 !== 0){ fail("回転ページは非対応です"); pdf.destroy(); return; }
+
+        var canvas = document.createElement("canvas");
+        canvas.width = Math.floor(viewport.width);
+        canvas.height = Math.floor(viewport.height);
+        var ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+        await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+
+        var items = await getItems(page, viewport);
+
+        if(p === 1){  // 様式チェック（間違った欄へのアップを止める）
+          var text = items.map(function(i){ return i.str; }).join("");
+          if(!items.length){ fail("テキストが取得できません（スキャンPDF？）"); pdf.destroy(); return; }
+          var ok = text.indexOf(fmt.marker) !== -1 &&
+                   !(fmtKey === "ms" && text.indexOf(FORMATS.aioi.marker) !== -1);
+          if(!ok){
+            var isOther = text.indexOf(FORMATS[fmt.other].marker) !== -1;
+            fail(isOther
+              ? "これは「" + FORMATS[fmt.other].tag + "」の様式です。もう一方の欄からアップしてください"
+              : "様式を判別できません。処理を中止しました");
+            pdf.destroy(); return;
+          }
+        }
+
+        var rects = computeRects(items, fmt);
+        ctx.fillStyle = "#000";
+        rects.forEach(function(r){ ctx.fillRect(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0); });
+        total += rects.length;
+        if(!rects.length) zeroPages++;
+
+        if(rec.big){
+          if(!rec.bigDoc) rec.bigDoc = newDoc(canvas);
+          else addPageTo(rec.bigDoc, canvas);
+          rec.bigDoc.addImage(canvas.toDataURL("image/jpeg", 0.72), "JPEG",
+            0, 0, canvas.width / SCALE, canvas.height / SCALE);
+          if(p <= PREVIEW_PAGES) addPreviewOnly(pagesDiv, canvas, p, rects.length);
+        } else {
+          rec.pages.push(buildPageUI(pagesDiv, canvas, p, rects.length));
+        }
+        page.cleanup();
+      }
+      var numPages = pdf.numPages;
+      pdf.destroy();
+
+      if(rec.big){
+        var note = document.createElement("p"); note.className = "note";
+        note.textContent = "ページ数が多いため先頭" + Math.min(PREVIEW_PAGES, numPages) +
+          "ページのみプレビュー表示しています（全ページ処理済み・手動追加は不可）。";
+        pagesDiv.appendChild(note);
+      }
+      rec.done = true; dl.disabled = false;
+      status.textContent = "完了 ・ 全" + numPages + "ページ ・ 黒塗り " + total + " 箇所";
+      if(total === 0 || zeroPages > 0){
+        var warn = document.createElement("span"); warn.className = "badge";
+        warn.textContent = total === 0 ? "黒塗り0件 — 様式を確認"
+                                       : "黒塗り0のページあり — プレビュー確認";
+        head.insertBefore(warn, dl);
+      }
+      updateSaveAll();
+    }catch(err){
+      fail("読み込みに失敗しました（暗号化PDF等）: " + (err && err.message ? err.message : err));
+    }
+  }
+
+  /* ---------- jsPDF ---------- */
+  function newDoc(canvas){
+    var w = canvas.width / SCALE, h = canvas.height / SCALE;
+    return new window.jspdf.jsPDF({ unit: "pt", format: [w, h],
+      orientation: w >= h ? "landscape" : "portrait", compress: true });
+  }
+  function addPageTo(doc, canvas){
+    var w = canvas.width / SCALE, h = canvas.height / SCALE;
+    doc.addPage([w, h], w >= h ? "landscape" : "portrait");
+  }
+  function downloadRecord(rec){
+    if(!rec.done) return;
+    var name = rec.file.name.replace(/\.pdf$/i, "") + "_masked.pdf";
+    if(rec.big && rec.bigDoc){ rec.bigDoc.save(name); return; }
+    if(!rec.pages.length) return;
+    var doc = newDoc(rec.pages[0].canvas);
+    rec.pages.forEach(function(pg, i){
+      if(i > 0) addPageTo(doc, pg.canvas);
+      doc.addImage(pg.canvas.toDataURL("image/jpeg", 0.9), "JPEG",
+        0, 0, pg.canvas.width / SCALE, pg.canvas.height / SCALE);
+    });
+    doc.save(name);
+  }
+
+  /* ---------- ページUI ---------- */
+  function addPreviewOnly(parent, canvas, pageNo, count){
+    var fig = document.createElement("figure"); fig.className = "page";
+    var wrap = document.createElement("div"); wrap.className = "wrap";
+    var pv = document.createElement("canvas");
+    pv.width = Math.floor(canvas.width * 0.45);
+    pv.height = Math.floor(canvas.height * 0.45);
+    pv.getContext("2d").drawImage(canvas, 0, 0, pv.width, pv.height);
+    wrap.appendChild(pv);
+    var cap = document.createElement("figcaption");
+    cap.textContent = "p." + pageNo + " ・ 黒塗り " + count + " 箇所";
+    fig.appendChild(wrap); fig.appendChild(cap); parent.appendChild(fig);
+  }
+
+  function buildPageUI(parent, canvas, pageNo, autoCount){
+    var fig = document.createElement("figure"); fig.className = "page";
+    var wrap = document.createElement("div"); wrap.className = "wrap";
+    var overlay = document.createElement("canvas"); overlay.className = "overlay";
+    overlay.width = canvas.width; overlay.height = canvas.height;
+    wrap.appendChild(canvas); wrap.appendChild(overlay);
+
+    var cap = document.createElement("figcaption");
+    var label = document.createElement("span"); label.textContent = "p." + pageNo;
+    var cnt = document.createElement("span"); cnt.className = "cnt";
+    var reset = document.createElement("button"); reset.className = "mini";
+    reset.textContent = "このページをやり直す";
+    cap.appendChild(label); cap.appendChild(cnt); cap.appendChild(reset);
+    fig.appendChild(wrap); fig.appendChild(cap); parent.appendChild(fig);
+
+    var pg = { canvas: canvas, overlay: overlay,
+               baseline: canvas.toDataURL("image/jpeg", 0.9),
+               auto: autoCount, manual: 0, cnt: cnt };
+    function updateCap(){
+      cnt.textContent = "黒塗り " + pg.auto + " 箇所" +
+        (pg.manual ? "（＋手動 " + pg.manual + "）" : "");
+    }
+    updateCap();
+
+    reset.addEventListener("click", function(){
+      var img = new Image();
+      img.onload = function(){
+        canvas.getContext("2d").drawImage(img, 0, 0);
+        pg.manual = 0; updateCap();
+      };
+      img.src = pg.baseline;
+    });
+
+    attachManualDraw(pg, updateCap);
+    return pg;
+  }
+
+  function attachManualDraw(pg, updateCap){
+    var overlay = pg.overlay, canvas = pg.canvas;
+    var octx = overlay.getContext("2d"), start = null;
+    function pos(e){
+      var r = overlay.getBoundingClientRect();
+      return { x: (e.clientX - r.left) * overlay.width / r.width,
+               y: (e.clientY - r.top) * overlay.height / r.height };
+    }
+    overlay.addEventListener("pointerdown", function(e){
+      if(!document.body.classList.contains("manual")) return;
+      e.preventDefault(); overlay.setPointerCapture(e.pointerId); start = pos(e);
+    });
+    overlay.addEventListener("pointermove", function(e){
+      if(!start) return;
+      var p = pos(e);
+      octx.clearRect(0, 0, overlay.width, overlay.height);
+      octx.fillStyle = "rgba(0,0,0,.55)"; octx.strokeStyle = "#000"; octx.lineWidth = 2;
+      var x = Math.min(start.x, p.x), y = Math.min(start.y, p.y);
+      octx.fillRect(x, y, Math.abs(p.x - start.x), Math.abs(p.y - start.y));
+      octx.strokeRect(x, y, Math.abs(p.x - start.x), Math.abs(p.y - start.y));
+    });
+    overlay.addEventListener("pointerup", function(e){
+      if(!start) return;
+      var p = pos(e);
+      var x = Math.min(start.x, p.x), y = Math.min(start.y, p.y);
+      var w = Math.abs(p.x - start.x), h = Math.abs(p.y - start.y);
+      start = null; octx.clearRect(0, 0, overlay.width, overlay.height);
+      if(w < 4 || h < 4) return;
+      var ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#000"; ctx.fillRect(x, y, w, h);
+      pg.manual++; updateCap();
+    });
+    overlay.addEventListener("pointercancel", function(){
+      start = null; octx.clearRect(0, 0, overlay.width, overlay.height);
+    });
+  }
+})();
+</script>
+</body>
+</html>
