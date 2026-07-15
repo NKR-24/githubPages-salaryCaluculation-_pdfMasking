@@ -305,7 +305,7 @@ const engine = $("#engine");
 function engineReady(note) {
   const rv = R.REDACTOR_VERSION || "旧版";
   engine.className = "engine ok";
-  engine.textContent = `エンジン準備完了 — mupdf.js 1.28.0 / redactor v${rv}` + note;
+  //engine.textContent = `エンジン準備完了 — mupdf.js 1.28.0 / redactor v${rv}` + note;
   if (rv === "旧版" || parseFloat(rv) < 2.1) {
     engine.className = "engine err";
     engine.textContent += "（redactor.js が古いままです。新しい redactor.js をアップして数分後に Ctrl+F5 してください）";
