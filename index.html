@@ -505,7 +505,7 @@ function showResult(ui, r) {
       `${r.v.geomLeaks.length ? "✗" : "✓"} ② 黒塗り領域内の残存文字 … ${r.v.geomLeaks.length}件`)
   );
   box.append(el("div", "v-line", "③ 黒塗り位置の目視 → 下のプレビュー（クリックで拡大）"));
-  ui.card.append(box);
+  //ui.card.append(box);
 
   const pv = el("div", "previews");
   r.previews.forEach((url, i) => {
