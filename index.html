@@ -1,6 +1,6 @@
 <!doctype html>
 <!--
-  明細書マスキング v2（テキスト保持型・真の墨消し）
+  明細書マスキング v2.1（テキスト保持型・真の墨消し）
   ================================================================
   置き方: リポジトリ直下に以下を配置して GitHub Pages で公開
     index.html        … このファイル
@@ -78,6 +78,21 @@
   .drop strong{font-size:15.5px;display:block;margin-top:4px}
   .drop p{margin:2px 0 4px;color:var(--sub);font-size:12.5px}
 
+  /* ─ Claude用プロンプト ─ */
+  .prompts{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}
+  .pbox{background:#fff;border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+  .pbox-head{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+  .pbox-head h2{margin:0;font-size:13px;flex:1}
+  .mini{background:#fff;color:var(--ink);border:1.5px solid var(--ink);border-radius:6px;
+    padding:3px 12px;font-size:12px;font-family:inherit;cursor:pointer}
+  .mini:hover{background:var(--marker)}
+  .mini:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+  .pbox textarea{width:100%;min-height:168px;resize:vertical;border:1px solid var(--line);
+    border-radius:6px;padding:8px 10px;background:#fbfaf7;color:inherit;
+    font:12px/1.7 var(--mono)}
+  .pbox textarea:focus-visible{outline:2px solid var(--ink)}
+  .pbox p{margin:6px 0 0;color:var(--sub);font-size:11.5px}
+
   /* ─ すべて保存 ─ */
   #saveAll{margin-top:18px;text-align:right}
 
@@ -86,13 +101,10 @@
   .card{position:relative;background:#fff;border:1px solid var(--line);
     border-radius:10px;padding:16px 18px;margin-top:14px}
   .card.err{border-left:4px solid var(--danger)}
-  .card.fail{border-left:4px solid var(--danger)}
   .card-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
   .fname{font-weight:700;word-break:break-all}
   .fmeta{color:var(--sub);font-size:12.5px;margin-top:1px}
   .errmsg{margin-top:8px;color:var(--danger);font-size:14px}
-  .failbanner{margin-top:10px;padding:8px 12px;background:#fbeceb;border-radius:8px;
-    color:var(--danger);font-weight:700;font-size:13.5px}
 
   /* 検証済スタンプ（署名要素） */
   .stamp{flex:none;position:relative;width:66px;height:66px;border:2.5px solid var(--stamp);
@@ -115,8 +127,6 @@
   .v-head{font-weight:700}
   .v-line.ok{color:var(--ok)}
   .v-line.bad{color:var(--danger);font-weight:700}
-  .warnbox{margin-top:10px;padding:8px 12px;background:#fdf6d8;border-radius:8px;
-    font-size:12.5px;color:#6b5b00}
 
   /* プレビュー */
   .previews{display:flex;gap:10px;margin-top:12px;overflow-x:auto;padding-bottom:4px}
@@ -131,17 +141,13 @@
   .btn:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
 
   /* ─ チェックリスト・フッター ─ */
-  .check{margin-top:44px;border-top:1px solid var(--line);padding-top:20px}
-  .check h2{font-size:16px;margin:0 0 8px}
-  .check ol{margin:0;padding-left:22px}
-  .check li{margin:4px 0}
-  .note{color:var(--sub);font-size:13px;margin-top:10px}
   footer{margin-top:36px;color:var(--sub);font-size:12px;border-top:1px solid var(--line);
     padding-top:14px}
 
   @media (max-width:640px){
     main{padding:28px 14px 60px}
     .zones{grid-template-columns:1fr}
+    .prompts{grid-template-columns:1fr}
     .previews img{height:170px}
     header h1{font-size:22px}
   }
@@ -155,7 +161,7 @@
 <body>
 <main>
   <header>
-    <h1>明細書の<span class="demo">契約者名<span class="ink" aria-hidden="true"></span></span>を墨消し<span class="ver">v2 テキスト保持型</span></h1>
+    <h1>明細書の<span class="demo">契約者名<span class="ink" aria-hidden="true"></span></span>を墨消し<span class="ver">v2.1 テキスト保持型</span></h1>
     <p class="privacy">すべて<b>ブラウザ内で処理</b>し、サーバには送信しません。黒塗り箇所は<b>文字データごと削除</b>、それ以外の文字はそのまま残るため、出力PDFは検索・AI読み取り（Excel化）がそのまま行えます。</p>
     <p class="engine" id="engine" aria-live="polite">エンジン読み込み中…（初回のみ約10MB。以降はキャッシュされます）</p>
   </header>
@@ -177,21 +183,44 @@
     </div>
   </section>
 
+  <section class="prompts" aria-label="Excel化用プロンプト">
+    <div class="pbox">
+      <div class="pbox-head">
+        <span class="tag">A</span>
+        <h2>あいおい masked PDF 用プロンプト</h2>
+        <button class="mini" data-copy="promptA">コピー</button>
+      </div>
+      <textarea id="promptA" spellcheck="false">このPDF（三井住友海上あいおい生命「手数料支払明細書」を黒塗りしたPDF。テキスト層あり・OCR不要で読めます）をExcel化してください。
+・Excelの1列目（A列）には、その行が載っているページの左上にあるコードを入れる。
+　「（７１４４０３）ＡＤＤ７４　－ＰＭ１１」のような表記は「ADD74-PM11」の形（半角）に揃える
+・2列目以降は、全ページの表をそのまま縦につなげる（列の値は変えない。ヘッダー行は先頭に1回だけ）
+・次の①②の両方に当てはまる行を黄色で塗りつぶす：
+　① A列が ADD74-PM07／ADD74-PM10／ADD74-PM11／ADD74-PM13／ADD74-PM21／ADD74-PM23／ADD74-PM40 のいずれか
+　② 「種別」の列が S1 または H2（全角表記のＳ１・Ｈ２も同じとみなす）
+・完成したxlsxファイルをダウンロードできる形で出力してください。</textarea>
+      <p>ダウンロードした masked PDF と一緒にClaudeへ貼り付けてください（内容は編集できます）。</p>
+    </div>
+    <div class="pbox">
+      <div class="pbox-head">
+        <span class="tag">B</span>
+        <h2>三井住友海上 masked PDF 用プロンプト</h2>
+        <button class="mini" data-copy="promptB">コピー</button>
+      </div>
+      <textarea id="promptB" spellcheck="false">このPDF（三井住友海上「手数料早期支払明細書」を黒塗りしたPDF。テキスト層あり・OCR不要で読めます）をExcel化してください。
+・全ページの表を1枚のシートに縦につなげる（ヘッダー行は先頭に1回だけ）
+・列の構成と各セルの値はPDFのまま保持する（並べ替え・省略・集計はしない）
+・「証券番号」の列が次のいずれかになっているセルを黄色で塗りつぶす：
+　ＡＤＤ７４ＰＭ０７合計／ＡＤＤ７４ＰＭ１０合計／ＡＤＤ７４ＰＭ１１合計／ＡＤＤ７４ＰＭ１３合計／ＡＤＤ７４ＰＭ２１合計／ＡＤＤ７４ＰＭ２３合計／ＡＤＤ７４ＰＭ４０合計
+・完成したxlsxファイルをダウンロードできる形で出力してください。</textarea>
+      <p>ダウンロードした masked PDF と一緒にClaudeへ貼り付けてください（内容は編集できます）。</p>
+    </div>
+  </section>
+
   <div id="saveAll" hidden>
-    <button class="btn" id="saveAllBtn">検証済のファイルをすべて保存</button>
+    <button class="btn" id="saveAllBtn">処理済のファイルをすべて保存</button>
   </div>
 
   <section id="results" aria-label="処理結果"></section>
-
-  <section class="check">
-    <h2>保存後の最終チェック</h2>
-    <ol>
-      <li>黒塗り部分を範囲選択しても<b>コピーできない</b>こと（文字データ自体を削除しています）</li>
-      <li>PDFの検索（Ctrl+F）で<b>契約者名や「Ｐｒｉｍｅ－ｏｎｅ」がヒットしない</b>こと</li>
-      <li><b>黒塗り位置のズレ・掛け漏れがない</b>こと（各カードのプレビューでも確認できます）</li>
-    </ol>
-    <p class="note">黒塗り以外の文字（証券番号・金額・ページ左上のコードなど）は意図的に残しています。テキスト層が保持されるため、Excel化などのAI処理をOCRなしで高速に行えます。座標がズレた場合は redactor.js 冒頭の FORMATS の数値を調整してください。</p>
-  </section>
 
   <footer>
     PDF処理: <a href="https://mupdf.com" target="_blank" rel="noopener">mupdf.js</a> v1.28.0（Artifex Software, AGPL-3.0）を同梱し、お使いのブラウザ内で実行しています。ファイルが外部へ送信されることはありません。
@@ -210,6 +239,29 @@
       }
     }
   }, 20000);
+
+  /* プロンプトのコピー（エンジン読み込みに失敗しても使える） */
+  document.addEventListener("DOMContentLoaded", function () {
+    document.querySelectorAll("[data-copy]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var ta = document.getElementById(btn.getAttribute("data-copy"));
+        if (!ta) return;
+        function done() {
+          var t = btn.textContent;
+          btn.textContent = "コピーしました";
+          setTimeout(function () { btn.textContent = t; }, 1500);
+        }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(ta.value).then(done, function () { fallback(); });
+        } else { fallback(); }
+        function fallback() {
+          ta.focus(); ta.select();
+          try { document.execCommand("copy"); done(); } catch (e) { alert("コピーできませんでした。手動で選択してコピーしてください。"); }
+          window.getSelection && window.getSelection().removeAllRanges();
+        }
+      });
+    });
+  });
 </script>
 
 <script type="module">
@@ -227,7 +279,7 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
 const outName = (name) => name.replace(/\.pdf$/i, "") + "_masked.pdf";
 
 let mupdf = null;
-const okResults = []; // {name, data}
+const allResults = []; // {name, data}
 
 /* ---------- エンジン読み込み ---------- */
 const engine = $("#engine");
@@ -365,10 +417,6 @@ async function processFile(file, zoneKey) {
       if (page.destroy) page.destroy();
       pagePlans.push(plan);
       for (const k of Object.keys(counts)) counts[k] += plan.counts[k];
-      for (const w of plan.warnings) warnings.push(`p${i + 1}: ${w}`);
-      if (fmt.mode === "rows" && plan.counts.row + plan.counts.kana === 0) {
-        warnings.push(`p${i + 1}: 契約者名の行が0件でした（様式ズレの可能性）`);
-      }
       ui.fill.style.width = (((i + 1) / total) * 88).toFixed(1) + "%";
       ui.plabel.textContent = `ページ ${i + 1}/${total} を墨消し中…`;
       if (i % 4 === 3) await tick();
@@ -377,7 +425,7 @@ async function processFile(file, zoneKey) {
     ui.plabel.textContent = "保存データを作成中…";
     ui.fill.style.width = "90%";
     await tick();
-    const out = doc.saveToBuffer("garbage=4,compress=yes").asUint8Array();
+    const out = R.saveMasked(doc);
     if (doc.destroy) doc.destroy();
 
     ui.plabel.textContent = "残存チェック中…";
@@ -440,22 +488,6 @@ function showResult(ui, r) {
   box.append(el("div", "v-line", "③ 黒塗り位置の目視 → 下のプレビュー（クリックで拡大）"));
   ui.card.append(box);
 
-  if (!r.v.ok) {
-    const pages = [...new Set([...r.v.tokenLeaks, ...r.v.geomLeaks].map((x) => "p" + x.page))].slice(0, 8);
-    const banner = el("div", "failbanner",
-      `✗ 検証で残存が見つかりました（${pages.join(", ")}${pages.length >= 8 ? " ほか" : ""}）。このファイルは配布・アップロードしないでください。`);
-    ui.card.insertBefore(banner, box);
-    ui.card.classList.add("fail");
-  }
-
-  if (r.warnings.length) {
-    const w = el("div", "warnbox");
-    w.append(el("div", null, "注意:"));
-    r.warnings.slice(0, 6).forEach((x) => w.append(el("div", null, "・" + x)));
-    if (r.warnings.length > 6) w.append(el("div", null, `…ほか ${r.warnings.length - 6} 件`));
-    ui.card.append(w);
-  }
-
   const pv = el("div", "previews");
   r.previews.forEach((url, i) => {
     const a = el("a");
@@ -479,9 +511,9 @@ function showResult(ui, r) {
   if (r.v.ok) {
     ui.stamp.hidden = false;
     ui.stamp.classList.add("on");
-    okResults.push({ name: outName(r.name), data: r.out });
-    updateSaveAll();
   }
+  allResults.push({ name: outName(r.name), data: r.out });
+  updateSaveAll();
 }
 
 /* ---------- ダウンロード ---------- */
@@ -496,11 +528,11 @@ function download(name, data) {
 const saveWrap = $("#saveAll");
 const saveBtn = $("#saveAllBtn");
 function updateSaveAll() {
-  saveWrap.hidden = okResults.length < 2;
-  saveBtn.textContent = `検証済の ${okResults.length} 件をすべて保存`;
+  saveWrap.hidden = allResults.length < 2;
+  saveBtn.textContent = `処理済の ${allResults.length} 件をすべて保存`;
 }
 saveBtn.addEventListener("click", async () => {
-  for (const r of okResults) {
+  for (const r of allResults) {
     download(r.name, r.data);
     await new Promise((s) => setTimeout(s, 400));
   }

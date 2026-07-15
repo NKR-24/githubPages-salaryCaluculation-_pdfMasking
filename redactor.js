@@ -12,7 +12,7 @@
  * 自体は呼び出し側から引数で渡す（読み込みパスが環境で異なるため）。
  */
 
-export const REDACTOR_VERSION = "2.0";
+export const REDACTOR_VERSION = "2.1";
 
 export const FORMATS = {
   aioi: {
@@ -163,11 +163,8 @@ export function planPage(page, fmt) {
   if (hits.length) {
     const xs = hits.map((h) => Math.min(...h.map((q) => Math.min(q[0], q[4]))));
     nameX1 = Math.min(...xs) - fmt.rightGuideGap;
-  } else {
-    plan.warnings.push(
-      `「${fmt.rightGuideKey}」が見つからないため右端に予備値 ${fmt.fallbackNameX1} を使用しました。`
-    );
   }
+  // 「口振」が無いページ（合計ページ等）は予備値をそのまま使う（警告なし）
 
   for (const line of lines) {
     if (line.text.includes(fmt.companyKey)) continue; // 既に処理済み
@@ -258,6 +255,18 @@ export function maskDocument(doc, fmtKey, onProgress) {
   return { pagePlans, counts, warnings, fmt };
 }
 
+/* ---------- 保存 ----------
+ * 重要: buffer.asUint8Array() は WASM ヒープへの「参照」を返す。
+ * コピーせずに保持すると、後続の処理（検証・プレビュー描画）でヒープが
+ * 伸長・再利用された時点で中身が壊れる。必ず .slice() でJS側へコピーする。
+ */
+export function saveMasked(doc) {
+  const buf = doc.saveToBuffer("garbage=4,compress=yes");
+  const out = buf.asUint8Array().slice();
+  if (buf.destroy) buf.destroy();
+  return out;
+}
+
 /* ---------- 検証 ----------
  * 出力バッファを開き直して 3 点を確認:
  *   1) 消した文字列（トークン）が全文から消えている
@@ -279,12 +288,17 @@ export function verifyDocument(mupdf, outData, maskResult) {
   if (doc.destroy) doc.destroy();
   const allTextNoSpace = stripSpaces(allText);
 
+  // 数字・記号・単位を除いた「氏名らしい部分」が2文字未満のトークンは
+  // 残存チェックの対象外（合計行の金額等が他ページの同額とマッチする誤検知を防ぐ）
+  const GENERIC_CHARS = /[0-9０-９.,，．()（）%％¥￥円件計\/／:：=＝*＊\-－]/g;
+  const nameLike = (t) => t.replace(GENERIC_CHARS, "").length >= 2;
+
   const tokenLeaks = [];
   const geomLeaks = [];
   maskResult.pagePlans.forEach((plan, i) => {
     for (const item of plan.rects) {
       const tok = item.token || "";
-      if (tok.length >= 2 && allTextNoSpace.includes(tok)) {
+      if (tok.length >= 2 && nameLike(tok) && allTextNoSpace.includes(tok)) {
         tokenLeaks.push({ page: i + 1, kind: item.kind, token: tok });
       }
       const [x0, y0, x1, y1] = item.rect;
